@@ -1,0 +1,161 @@
+trigger:
+- main
+
+pool:
+  name: Default
+
+# Define Variables for Environments
+variables:
+- name: DEV_ENVIRONMENT
+  value: dev
+- name: QA_ENVIRONMENT
+  value: qa
+- group: azure_portal
+
+stages:
+# Stage-1: Terraform Validate Stage
+- stage: TerraformValidate
+  jobs:
+    - job: TerraformValidateJob
+      workspace:
+        clean: all
+      continueOnError: false
+      steps:
+      ## Step-1: Publish Artifacts to Pipeline
+      - task: PublishBuildArtifacts@1
+        displayName: Publish Artifacts
+        inputs:
+          PathtoPublish: '$(System.DefaultWorkingDirectory)/cluster/terraform'
+          ArtifactName: 'terraform-manifests-out'
+          publishLocation: 'Container'
+      ## Step-2: Install Latest Terraform (Ideally not needed if we use default Ubuntu Agents)
+      - task: TerraformInstaller@1
+        displayName: Terraform Install
+        inputs:
+          terraformVersion: '1.9.7'
+      ## Step-3: Validate Terraform Manifests (terraform init, terraform validate)
+      - task: TerraformTaskV4@4
+        displayName: Terraform Init
+        inputs:
+          provider: 'azurerm'
+          command: 'init'
+          # commandOptions: '-reconfigure'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/cluster/terraform'
+          backendServiceArm: 'terraform-aks-azurerm-svc-con'
+          backendAzureRmResourceGroupName: 'remote_state'
+          backendAzureRmStorageAccountName: 'terraformremotestateaks'
+          backendAzureRmContainerName: 'tfstatefiles'
+          backendAzureRmKey: 'base.tfstate'
+      - task: TerraformTaskV4@4
+        displayName: Terraform Validate
+        inputs:
+          provider: 'azurerm'
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/cluster/terraform'
+
+# Stage-2: Deploy Stages for Dev & QA
+- stage: DeployAKSClusters
+  jobs:
+    # Deployment-1: Deploy Dev AKS Cluster
+    ## Step-1: Define Variables for environments
+    - deployment: DeployDevAKSCluster
+      displayName: DeployDevAKSCluster
+      environment: $(DEV_ENVIRONMENT)
+      workspace:
+        clean: all
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            ## Step-2: Download SSH Secure File
+            - task: DownloadSecureFile@1
+              displayName: Download SSH Key
+              name: sshkey
+              inputs:
+                secureFile: 'aks-terraform-devops-ssh-key-ubuntu.pub'
+            ## Step-3: Terraform Initialize (State Storage to store in Azure Storage Account for Dev AKS Cluster)
+            - task: TerraformTaskV4@4
+              displayName: Terraform Init
+              inputs:
+                provider: 'azurerm'
+                command: 'init'
+                # commandOptions: '-reconfigure'
+                workingDirectory: '$(Pipeline.Workspace)/terraform-manifests-out'
+                backendServiceArm: 'terraform-aks-azurerm-svc-con'
+                backendAzureRmResourceGroupName: 'remote_state'
+                backendAzureRmStorageAccountName: 'terraformremotestateaks'
+                backendAzureRmContainerName: 'tfstatefiles'
+                backendAzureRmKey: 'aks-$(DEV_ENVIRONMENT).tfstate'
+            ## Step-4: Terraform Plan (Create Plan)
+            - task: TerraformTaskV4@4
+              displayName: Terraform Plan
+              inputs:
+                provider: 'azurerm'
+                command: 'plan'
+                workingDirectory: '$(Pipeline.Workspace)/terraform-manifests-out'
+                commandOptions: >
+                  -var "linux_profile={enabled=true, ssh_public_key=\"$(sshkey.secureFilePath)\"}"
+                  -var environment=$(DEV_ENVIRONMENT)
+                  -var subscription_id=$(subscription_id)
+                  -out $(Pipeline.Workspace)/terraform-manifests-out/$(DEV_ENVIRONMENT)-$(Build.BuildId).out
+                environmentServiceNameAzureRM: 'terraform-aks-azurerm-svc-con'
+            ## Step-5: Terraform Apply (Use the plan created in previous step)
+            # - task: TerraformTaskV4@4
+            #   displayName: Terraform Apply
+            #   inputs:
+            #     provider: 'azurerm'
+            #     command: 'apply'
+            #     workingDirectory: '$(Pipeline.Workspace)/terraform-manifests-out'
+            #     commandOptions: '$(Pipeline.Workspace)/terraform-manifests-out/$(DEV_ENVIRONMENT)-$(Build.BuildId).out'
+            #     environmentServiceNameAzureRM: 'terraform-aks-azurerm-svc-con'
+    # Deployment-2: Deploy QA AKS Cluster
+    - deployment: DeployQAAKSCluster
+      displayName: DeployQAAKSCluster
+      environment: $(QA_ENVIRONMENT)
+      workspace:
+        clean: all
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            ## Step-2: Download SSH Secure File
+            - task: DownloadSecureFile@1
+              displayName: Download SSH Key
+              name: sshkey
+              inputs:
+                secureFile: 'aks-terraform-devops-ssh-key-ubuntu.pub'
+            ## Step-3: Terraform Initialize (State Storage to store in Azure Storage Account for Dev AKS Cluster)
+            - task: TerraformTaskV4@4
+              displayName: Terraform Init
+              inputs:
+                provider: 'azurerm'
+                command: 'init'
+                # commandOptions: '-reconfigure'
+                workingDirectory: '$(Pipeline.Workspace)/terraform-manifests-out'
+                backendServiceArm: 'terraform-aks-azurerm-svc-con'
+                backendAzureRmResourceGroupName: 'remote_state'
+                backendAzureRmStorageAccountName: 'terraformremotestateaks'
+                backendAzureRmContainerName: 'tfstatefiles'
+                backendAzureRmKey: 'aks-$(QA_ENVIRONMENT).tfstate'
+            ## Step-4: Terraform Plan (Create Plan)
+            - task: TerraformTaskV4@4
+              displayName: Terraform Plan
+              inputs:
+                provider: 'azurerm'
+                command: 'plan'
+                workingDirectory: '$(Pipeline.Workspace)/terraform-manifests-out'
+                commandOptions: >
+                  -var "linux_profile={enabled=true, ssh_public_key=\"$(sshkey.secureFilePath)\"}"
+                  -var environment=$(QA_ENVIRONMENT)
+                  -var subscription_id=$(subscription_id)
+                  -out $(Pipeline.Workspace)/terraform-manifests-out/$(QA_ENVIRONMENT)-$(Build.BuildId).out
+                environmentServiceNameAzureRM: 'terraform-aks-azurerm-svc-con'
+            ## Step-5: Terraform Apply (Use the plan created in previous step)
+            # - task: TerraformTaskV4@4
+            #   displayName: Terraform Apply
+            #   inputs:
+            #     provider: 'azurerm'
+            #     command: 'apply'
+            #     workingDirectory: '$(Pipeline.Workspace)/terraform-manifests-out'
+            #     commandOptions: '$(Pipeline.Workspace)/terraform-manifests-out/$(QA_ENVIRONMENT)-$(Build.BuildId).out'
+            #     environmentServiceNameAzureRM: 'terraform-aks-azurerm-svc-con'
